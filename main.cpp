@@ -2,9 +2,7 @@
 
 #include <iostream>
 #include <sstream>
-
 #include <vector>
-
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -194,8 +192,29 @@ public:
         //      For all other sites Pj (optionally, only k nearest neighbors) :
         //          Clip it with bisector of [Pi,Pj]
         //      (Lab 3, fluids) : also clip it by a disk of radius sqrt(w_i - w_air) centered at Pi
-    }
+        int N = points.size();
+        cells.resize(N);
 
+    #pragma omp parallel for
+        for (int i = 0; i < N; i++) {
+            Polygon c;
+
+            c.vertices.push_back(Vector(0, 0));
+            c.vertices.push_back(Vector(1, 0));
+            c.vertices.push_back(Vector(1, 1));
+            c.vertices.push_back(Vector(0, 1));
+
+            for (int j = 0; j < N; j++) {
+                if (i == j){
+                    continue;
+                }
+                c = clip_by_bisector(c, points[i], points[j], 0, 0);
+            }
+            
+            cells[i] = c;
+        }
+
+    }
 
     static Polygon clip_by_edge(const Polygon& V, const Vector& u, const Vector& v) {
 
@@ -216,7 +235,30 @@ public:
         // TODO Lab 2 (Semi-Discrete Optimal Transport) : extend to Laguerre cells, i.e., w0 != w1
 
         Polygon result;
+        Vector M = (P0 + Pi) / 2;
+        int N = V.vertices.size();
 
+        result.vertices.reserve(N+1); // advised by teacher
+
+        for (int i = 0; i < N; i++) {
+            Vector A = V.vertices[i == 0 ? N - 1 : i - 1];
+            bool b1 = (A - P0).norm2() <= (A - Pi).norm2();
+
+            Vector B = V.vertices[i];
+            bool b2 = (B - P0).norm2() <= (B - Pi).norm2();
+
+            double t = dot(M - A, Pi - P0) / dot(B - A, Pi - P0);
+            Vector P = A + t * (B - A);
+
+            if (b2){
+                if (!b1){
+                    result.vertices.push_back(P);
+                }
+                result.vertices.push_back(B);
+            } else if (b1) {
+                result.vertices.push_back(P);
+            }
+        }
         return result;
     }
 
@@ -338,7 +380,7 @@ public:
 };
 
 // saves a static svg file. The polygon vertices are supposed to be in the range [0..1], and a canvas of size 1000x1000 is created
-void save_svg(const std::vector<Polygon>& polygons, std::string filename, std::string fillcol = "none") {
+void save_svg(const std::vector<Polygon>& polygons, std::string filename, const std::vector<Vector>* points = NULL, std::string fillcol = "none") {
     FILE* f = fopen(filename.c_str(), "w+");
     fprintf(f, "<svg xmlns = \"http://www.w3.org/2000/svg\" width = \"1000\" height = \"1000\">\n");
     for (int i = 0; i < polygons.size(); i++) {
@@ -350,19 +392,39 @@ void save_svg(const std::vector<Polygon>& polygons, std::string filename, std::s
         fprintf(f, "\"\nfill = \"%s\" stroke = \"black\"/>\n", fillcol.c_str());
         fprintf(f, "</g>\n");
     }
+
+    if (points) {
+        fprintf(f, "<g>\n");
+        for (int i = 0; i < points->size(); i++) {
+            fprintf(f, "<circle cx = \"%3.3f\" cy = \"%3.3f\" r = \"3\" />\n", (*points)[i][0] * 1000., 1000. - (*points)[i][1] * 1000);
+        }
+        fprintf(f, "</g>\n");
+
+    }
+
     fprintf(f, "</svg>\n");
     fclose(f);
 }
 
 
-
-
-
-
-
 int main() {
+    int N = 100;
+    VoronoiDiagram v;
+    v.points.resize(N);
+    v.weights.resize(N, 0);
 
-    Polygon p;
+    for (int i = 0; i < N; i++) {
+        v.points[i] = Vector((double)rand() / (double)RAND_MAX, (double)rand() / (double)RAND_MAX); // I used https://stackoverflow.com/questions/1340729/how-do-you-generate-a-random-double-uniformly-distributed-between-0-and-1-from-c
+    }
+
+    v.compute();
+
+    save_svg(v.cells, "voronoi.svg", &v.points);
+    save_frame(v.cells, "voronoi");
+
+    return 0;
+
+    /*Polygon p;
     p.vertices.push_back(Vector(0.1, 0.2));
     p.vertices.push_back(Vector(0.6, 0.4));
     p.vertices.push_back(Vector(0.5, 0.7));
@@ -372,6 +434,6 @@ int main() {
     s.push_back(p);
 
     save_frame(s, "toto");
-    save_svg(s, "toto.svg");
-    return 0;
+    save_svg(s, "toto.svg", &p.vertices);
+    return 0;*/
 }
