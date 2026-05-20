@@ -57,9 +57,18 @@ public:
 
     double area() {
         if (vertices.size() < 3) return 0;
-        // TODO Lab 3
+        // TODO Lab 2
         // Compute the area of the polygon
-        return -111;
+
+        int N = vertices.size();
+        double A = 0;
+
+        for (int i = 0; i < N; i++) {  
+            int j = (i + 1) % N;
+            A += vertices[i][0] * vertices[j][1] - vertices[j][0] * vertices[i][1];
+        }
+
+        return std::abs(A)/2.0;
     }
 
     Vector centroid() {
@@ -73,10 +82,25 @@ public:
     double integral_square_distance(const Vector& Pi) {
         if (vertices.size() < 3) return 0;
 
-        // TODO Lab 3
+        // TODO Lab 2
         // Compute the integral of ||x-Pi||^2 over the polygon
+        int N = vertices.size();
+        double res = 0;
 
-        return -111;
+        for (int i = 1; i < N - 1; i++) {
+            Vector c1 = vertices[0];
+            Vector c2 = vertices[i];
+            Vector c3 = vertices[i + 1];
+
+            double T = std::abs((c2[0] - c1[0]) * (c3[1] - c1[1]) - (c2[1] - c1[1]) * (c3[0] - c1[0])) / 2.0;
+
+            Vector v1 = c1 - Pi;
+            Vector v2 = c2 - Pi;
+            Vector v3 = c3 - Pi;
+
+            res += T / 6.0 * (dot(v1, v1) + dot(v1, v2) + dot(v1, v3) + dot(v2, v2) + dot(v2, v3) + dot(v3, v3));
+        }
+        return res;
     }
 
     std::vector<Vector> vertices;
@@ -207,7 +231,7 @@ public:
                 if (i == j){
                     continue;
                 }
-                c = clip_by_bisector(c, points[i], points[j], 0, 0);
+                c = clip_by_bisector(c, points[i], points[j], weights[i], weights[j]);
             }
             
             cells[i] = c;
@@ -234,17 +258,17 @@ public:
         // TODO Lab 2 (Semi-Discrete Optimal Transport) : extend to Laguerre cells, i.e., w0 != w1
 
         Polygon result;
-        Vector M = (P0 + Pi) / 2;
+        Vector M = (P0 + Pi) / 2.0 + ((w0 - wi) / (2 * (Pi - P0).norm2())) * (Pi - P0); 
         int N = V.vertices.size();
 
         result.vertices.reserve(N+1); // advised by teacher
 
         for (int i = 0; i < N; i++) {
             Vector A = V.vertices[i == 0 ? N - 1 : i - 1];
-            bool b1 = (A - P0).norm2() <= (A - Pi).norm2();
+            bool b1 = (A - P0).norm2() - w0 <= (A - Pi).norm2() - wi;
 
             Vector B = V.vertices[i];
-            bool b2 = (B - P0).norm2() <= (B - Pi).norm2();
+            bool b2 = (B - P0).norm2() - w0 <= (B - Pi).norm2() - wi;
 
             double t = dot(M - A, Pi - P0) / dot(B - A, Pi - P0);
             Vector P = A + t * (B - A);
@@ -305,6 +329,17 @@ static lbfgsfloatval_t evaluate(
     lbfgsfloatval_t fx = 0.0;
     // g[i] = ...
     // fx = ...
+
+    double lambda = 1.0 / n;            // I had a bug here by first putting 1/n => integer division i think (and in few other part in the code)
+    for (int i = 0; i < n; i++) {
+        double A_i = ot->vor.cells[i].area();
+        double isd = ot->vor.cells[i].integral_square_distance(ot->vor.points[i]);
+
+        double g_i = isd - x[i] * A_i + lambda * x[i];
+
+        fx  -= g_i;
+        g[i] = A_i - lambda;
+    }
 
     return fx;
 }
@@ -407,19 +442,20 @@ void save_svg(const std::vector<Polygon>& polygons, std::string filename, const 
 
 
 int main() {
-    int N = 100;
-    VoronoiDiagram v;
-    v.points.resize(N);
-    v.weights.resize(N, 0);
+    int N = 1000;
+
+    OptimalTransport ot;
+    ot.vor.points.resize(N);
+    ot.vor.weights.resize(N, 0);
 
     for (int i = 0; i < N; i++) {
-        v.points[i] = Vector((double)rand() / (double)RAND_MAX, (double)rand() / (double)RAND_MAX); // I used https://stackoverflow.com/questions/1340729/how-do-you-generate-a-random-double-uniformly-distributed-between-0-and-1-from-c
+        ot.vor.points[i] = Vector((double)rand() / (double)RAND_MAX, (double)rand() / (double)RAND_MAX); // I used https://stackoverflow.com/questions/1340729/how-do-you-generate-a-random-double-uniformly-distributed-between-0-and-1-from-c
     }
 
-    v.compute();
+    ot.optimize();
 
-    save_svg(v.cells, "voronoi.svg", &v.points);
-    save_frame(v.cells, "voronoi");
+    save_svg(ot.vor.cells, "ot.svg", &ot.vor.points);
+    save_frame(ot.vor.cells, "ot");
 
     return 0;
 
