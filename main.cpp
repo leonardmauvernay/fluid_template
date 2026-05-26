@@ -3,11 +3,14 @@
 #include <sstream>
 #include <vector>
 
-
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 #include "lbfgs.h"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323856
+#endif
 
 double sqr(double x) { return x * x; };
 
@@ -76,8 +79,18 @@ public:
         if (vertices.size() < 3) return Vector(0, 0);
         // TODO Lab 3
         // Compute the centroid of the polygon
-
-        return Vector(-111,-111);
+        int N = vertices.size();
+        double A = 0;
+        double cx = 0;
+        double cy = 0;
+        for (int i = 0; i < N; i++) {
+            int j = (i + 1) % N;
+            double cross_p = vertices[i][0]*vertices[j][1] - vertices[j][0]*vertices[i][1];
+            A += cross_p;
+            cx += (vertices[i][0] + vertices[j][0]) * cross_p;
+            cy += (vertices[i][1] + vertices[j][1]) * cross_p;
+        }
+        return Vector(cx / (3 * A), cy / (3 * A));
     }
 
     double integral_square_distance(const Vector& Pi) {
@@ -218,11 +231,13 @@ public:
         //      (Lab 3, fluids) : also clip it by a disk of radius sqrt(w_i - w_air) centered at Pi
         int N = points.size();
         cells.resize(N);
+        bool f = ((int)weights.size() > N);
+        double w_air = f ? weights[N] : 0;
 
-    #pragma omp parallel for
+    #pragma omp parallel for schedule(dynamic) // added "for schedule(dynamic)" to possibly gain efficiency
         for (int i = 0; i < N; i++) {
             Polygon c;
-
+            
             c.vertices.push_back(Vector(0, 0));
             c.vertices.push_back(Vector(1, 0));
             c.vertices.push_back(Vector(1, 1));
@@ -233,8 +248,30 @@ public:
                     continue;
                 }
                 c = clip_by_bisector(c, points[i], points[j], weights[i], weights[j]);
+                if (c.vertices.empty()){
+                    break;
+                }
             }
-            
+
+            if (f) {
+                double r_2 = weights[i]- w_air;
+                if (r_2 <= 0) {
+                    c.vertices.clear();
+                } else {
+                    double r = sqrt(r_2);
+                    int M = 80;
+                    for (int k = 0; k < M; k++) {
+                        double a1 = 2.0 * M_PI * k / M;
+                        double a2 = 2.0 * M_PI * (k + 1) / M;
+                        Vector u(points[i][0] + r* cos(a1), points[i][1] + r * sin(a1));
+                        Vector v(points[i][0] + r * cos(a2), points[i][1] + r * sin(a2));
+                        c = clip_by_edge(c, u, v);
+                        if (c.vertices.empty()){
+                            break;
+                        }
+                    }
+                }
+            }
             cells[i] = c;
         }
 
@@ -247,7 +284,30 @@ public:
         // Will be used to clip a polygon (a cell) by all the edges of a (discretized) disk
 
         Polygon result;
+        Vector N_d(u[1] - v[1], v[0] - u[0]);
+        int N = V.vertices.size();
 
+        result.vertices.reserve(N + 1);
+
+        for (int i = 0; i < N; i++) {
+            Vector A = V.vertices[i == 0 ? N - 1 : i - 1];
+            bool b1 = dot(A - u, N_d) >= 0;
+
+            Vector B = V.vertices[i];
+            bool b2 = dot(B - u, N_d) >= 0;
+
+            double t = dot(u - A, N_d) / dot(B - A, N_d);
+            Vector P = A + t * (B - A);
+
+            if (b2) {
+                if (!b1){ 
+                    result.vertices.push_back(P);
+                }
+                result.vertices.push_back(B);
+            } else if (b1) {
+                result.vertices.push_back(P);
+            }
+        }
         return result;
     }
 
@@ -305,6 +365,9 @@ public:
     void optimize();
 
     VoronoiDiagram vor;
+
+    double fluid_volume = 1.0;
+
 };
 
 
@@ -331,15 +394,26 @@ static lbfgsfloatval_t evaluate(
     // g[i] = ...
     // fx = ...
 
-    double lambda = 1.0 / n;            // I had a bug here by first putting 1/n => integer division i think (and in few other part in the code)
-    for (int i = 0; i < n; i++) {
+    int N_fluid = (int)ot->vor.points.size();
+    bool f = (n > N_fluid);
+    double lambda = f ? ot->fluid_volume / N_fluid : 1.0 / n; // I had a bug here by first putting 1/n => integer division i think (and in few other part in the code)
+
+    double s = 0;
+
+    for (int i = 0; i < N_fluid; i++) {
         double A_i = ot->vor.cells[i].area();
         double isd = ot->vor.cells[i].integral_square_distance(ot->vor.points[i]);
 
         double g_i = isd - x[i] * A_i + lambda * x[i];
 
-        fx  -= g_i;
+        fx -= g_i;
         g[i] = A_i - lambda;
+        s += A_i;
+    }
+
+    if (f) {
+        g[N_fluid] = ot->fluid_volume - s;
+        fx -= x[N_fluid] * (s - ot->fluid_volume);
     }
 
     return fx;
@@ -382,19 +456,81 @@ void OptimalTransport::optimize() {
 // Lab 3 (fluids)
 class Fluid {
 public:
-    Fluid(int N_particles = 1000) : N_particles(N_particles) {
+    Fluid(int N_particles = 1000) : N_particles(N_particles), fluid_volume(0.5) {
+        particles.resize(N_particles);
+        velocities.resize(N_particles, Vector(0, 0));
+
+        
+        Vector center(0.5, 0.5);
+        double r = sqrt(fluid_volume / M_PI);
+
+        int c = 0;
+        while (c < N_particles) {
+            double x = center[0] - r + 2 * r * (double)rand() / RAND_MAX; // I used https://stackoverflow.com/questions/1340729/how-do-you-generate-a-random-double-uniformly-distributed-between-0-and-1-from-c
+            double y = center[1] - r + 2 * r * (double)rand() / RAND_MAX;
+            Vector p(x, y);
+            if ((p - center).norm2() <= r * r) {
+                particles[c] = p;
+                c++;
+            }
+        }
+
+        ot.fluid_volume = fluid_volume;
+        ot.vor.points = particles;
+
+        ot.vor.weights.resize(N_particles + 1, fluid_volume / (N_particles * M_PI));
+        ot.vor.weights[N_particles] = 0;
     }
 
     // Lab 3 : advance the simulation dt in time
     void time_step(double dt) {
 
         double epsilon2 = 0.004 * 0.004;
+
         Vector g(0, -9.81);
+
         double m_i = 200;
 
         // TODO Lab 3 : 
         // Compute semi-discrete partial optimal transport
         // for all particles, add gravity and spring force towards cell centroid, integrate acceleration->velocity and velocity->position
+
+        ot.fluid_volume = fluid_volume;
+        ot.vor.points = particles;
+
+        ot.optimize();
+
+        for (int i = 0; i < N_particles; i++) {
+            Vector C = particles[i];
+
+            if (ot.vor.cells[i].vertices.size() >= 3){
+                C = ot.vor.cells[i].centroid();
+            }
+
+            Vector F = ((C - particles[i]) / epsilon2) + m_i * g;
+            velocities[i] = velocities[i] + (dt / m_i) * F;
+            particles[i] = particles[i] + dt * velocities[i];
+
+            if (particles[i][0] < 0) { 
+                particles[i][0] *= -1;                   
+                velocities[i][0] *= -1; 
+            }
+
+            if (particles[i][0] > 1) { 
+                particles[i][0] = 2 - particles[i][0]; 
+                velocities[i][0] *= -1; 
+            }
+
+            if (particles[i][1] < 0) { 
+                particles[i][1] *= -1;                   
+                velocities[i][1] *= -1; 
+            }
+
+            if (particles[i][1] > 1) { 
+                particles[i][1] = 2 - particles[i][1]; 
+                velocities[i][1] *= -1; 
+            }
+        }
     }
 
     // just run the full simulation
@@ -402,7 +538,7 @@ public:
         double dt = 0.002;
         for (int i = 0; i < 1000; i++) {
             time_step(dt);
-            save_frame(ot.vor.cells, "test", i);
+            save_frame(ot.vor.cells, "frames/test", i);
         }
     }
 
@@ -443,6 +579,12 @@ void save_svg(const std::vector<Polygon>& polygons, std::string filename, const 
 
 
 int main() {
+    int N = 500;
+    Fluid fluid(N);
+    fluid.run_simulation();
+    return 0;
+
+    /*
     int N = 100;
 
     OptimalTransport ot;
@@ -460,7 +602,8 @@ int main() {
 
     return 0;
 
-    /*Polygon p;
+
+    Polygon p;
     p.vertices.push_back(Vector(0.1, 0.2));
     p.vertices.push_back(Vector(0.6, 0.4));
     p.vertices.push_back(Vector(0.5, 0.7));
