@@ -3,6 +3,7 @@
 #include <sstream>
 #include <vector>
 
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -442,7 +443,7 @@ void save_svg(const std::vector<Polygon>& polygons, std::string filename, const 
 
 
 int main() {
-    int N = 1000;
+    int N = 100;
 
     OptimalTransport ot;
     ot.vor.points.resize(N);
